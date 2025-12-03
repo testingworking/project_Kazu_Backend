@@ -1,166 +1,95 @@
-# ---------------------------
-# 1. Imports & Setup
-# ---------------------------
-from datetime import datetime
 import json
-import threading
-
-import firebase_admin
-from firebase_admin import credentials, db, firestore
-from flask import Flask, jsonify
-from flask_cors import CORS
 import paho.mqtt.client as mqtt
-
+import firebase_admin
+from firebase_admin import credentials, db
+from datetime import datetime
+import os
 
 # ---------------------------
-# 2. Firebase Initialization
+# Firebase Setup
 # ---------------------------
-SERVICE_ACCOUNT_FILE = "serviceAccountKey.json"
-DATABASE_URL = "https://project-kazu-fd451-default-rtdb.firebaseio.com/"
+
+# Make sure you download your service account JSON
+SERVICE_ACCOUNT_FILE = "path/to/serviceAccountKey.json"  # <-- Replace with your file
+DATABASE_URL = "https://project-kazu-fd451-default-rtdb.firebaseio.com/"  # <-- Replace with your Firebase Realtime DB URL
+
+if not os.path.exists(SERVICE_ACCOUNT_FILE):
+    raise FileNotFoundError(f"Firebase service account file not found: {SERVICE_ACCOUNT_FILE}")
 
 cred = credentials.Certificate(SERVICE_ACCOUNT_FILE)
-firebase_admin.initialize_app(cred, {'databaseURL': DATABASE_URL})
-
-# Firestore client
-firestore_db = firestore.client()
-
+firebase_admin.initialize_app(cred, {
+    'databaseURL': DATABASE_URL
+})
 
 # ---------------------------
-# 3. MQTT Setup
+# MQTT Broker Settings
 # ---------------------------
 BROKER = "broker.hivemq.com"
 PORT = 1883
-USERNAME = "esp32_kazu"
+USERNAME = "esp32_kazu"  # Replace if your broker needs auth
 PASSWORD = "ESP32_kazu"
 
-mqtt_client = mqtt.Client()
-mqtt_client.username_pw_set(USERNAME, PASSWORD)
-
-# Global user devices storage
-user_devices = {}  # {user_id: ['device1', 'device2']}
-
+# List of devices to subscribe
+devices = ['device1234']  # Add more devices as needed
 
 # ---------------------------
-# 4. MQTT Callbacks
+# MQTT Callbacks
 # ---------------------------
 def on_connect(client, userdata, flags, rc):
-    print("✅ Connected to MQTT Broker!" if rc == 0 else f"❌ MQTT connection failed: {rc}")
+    if rc == 0:
+        print("✅ Connected to MQTT Broker!")
+        subscribe_devices(client, devices)
+    else:
+        print(f"❌ Failed to connect, return code {rc}")
 
+def subscribe_devices(client, devices):
+    for device in devices:
+        topic = f"pets_live/{device}/alert"
+        client.subscribe(topic, qos=0)
+        print(f"🔔 Subscribed to {topic}")
 
 def on_message(client, userdata, msg):
     try:
         payload = msg.payload.decode()
+        print(f"Received message from {msg.topic}: {payload}")
 
-        # Try decode JSON
+        # Convert payload to dict
         try:
             data = json.loads(payload)
         except json.JSONDecodeError:
             data = {'message': payload}
 
+        # Timestamp-based key
         now = datetime.now()
         formatted_date = now.strftime("%Y%m%d_%H%M%S")
 
-        device_id = msg.topic.split('/')[1]
+        # Extract deviceId from topic
+        topic_parts = msg.topic.split('/')
+        device_id = topic_parts[1] if len(topic_parts) > 1 else "unknown_device"
 
-        # Save alert in Firebase RTDB
-        ref = db.reference(f"alert/{device_id}/{formatted_date}")
-        ref.set({
+        # Push alert to Firebase under timestamp key
+        alert_ref = db.reference(f"alert/{device_id}/{formatted_date}")
+        alert_ref.set({
             'message': data.get('message', ''),
             'createdAt': now.isoformat()
         })
 
-        # Update notification count
-        notif_ref = db.reference("alert/notificationCount")
+        # Update notification count for this device
+        notif_ref = db.reference(f"alert/notificationCount")
         current_count = notif_ref.get() or 0
         notif_ref.set(current_count + 1)
 
-        print(f"🔔 Alert saved for {device_id} at {formatted_date}")
-
+        print(f"✅ Alert saved for {device_id} at {formatted_date}")
     except Exception as e:
         print(f"❌ Error processing message: {e}")
 
-
-mqtt_client.on_connect = on_connect
-mqtt_client.on_message = on_message
-
-
 # ---------------------------
-# 5. Helper Functions
+# Connect to MQTT Broker
 # ---------------------------
-def subscribe_devices(devices):
-    for device in devices:
-        topic = f"pets_live/{device}/alert"
-        mqtt_client.subscribe(topic, qos=0)
-        print(f"🔔 Subscribed to {topic}")
+client = mqtt.Client()
+client.username_pw_set(USERNAME, PASSWORD)
+client.on_connect = on_connect
+client.on_message = on_message
 
-
-def fetch_devices_for_user(user_id):
-    try:
-        print(f"Fetching devices for user {user_id}")
-        doc_ref = firestore_db.collection('users').document(user_id)
-        doc = doc_ref.get()
-
-        if not doc.exists:
-            return []
-
-        data = doc.to_dict()
-
-        if isinstance(data.get('devices'), list):
-            return data['devices']
-
-        elif isinstance(data.get('devices'), dict):
-            return list(data['devices'].keys())
-
-        return []
-
-    except Exception as e:
-        print(f"❌ Error fetching devices for user {user_id}: {e}")
-        return []
-
-
-# ---------------------------
-# 6. Flask API
-# ---------------------------
-
-app = Flask(__name__)
-CORS(app)
-
-# Health check route
-@app.route('/', methods=['GET'])
-def home():
-    return jsonify({
-        "message": "🐾 Kazu server running!",
-        "service": "MQTT + Firebase Bridge",
-        "status": "ok"
-    }), 200
-
-
-# Get user's devices and subscribe to topics
-@app.route('/user/<user_id>', methods=['GET'])
-def get_user_devices(user_id):
-    devices = fetch_devices_for_user(user_id)
-
-    user_devices[user_id] = devices
-    subscribe_devices(devices)
-
-    return jsonify({'devices': devices}), 200
-
-
-# ---------------------------
-# 7. Run MQTT in Background
-# ---------------------------
-def start_mqtt():
-    mqtt_client.connect(BROKER, PORT, 60)
-    mqtt_client.loop_forever()
-
-
-mqtt_thread = threading.Thread(target=start_mqtt)
-mqtt_thread.daemon = True
-mqtt_thread.start()
-
-
-# ---------------------------
-# 8. Run Flask Server
-# ---------------------------
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000)
+client.connect(BROKER, PORT, 60)
+client.loop_forever()
