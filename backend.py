@@ -3,23 +3,32 @@
 # ---------------------------
 from datetime import datetime
 import json
+import os
 import threading
 
+from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, db, firestore
 from flask import Flask, jsonify
 from flask_cors import CORS
 import paho.mqtt.client as mqtt
+load_dotenv()
 
 
 # ---------------------------
 # 2. Firebase Initialization
 # ---------------------------
-SERVICE_ACCOUNT_FILE = "serviceAccountKey.json"
-DATABASE_URL = "https://project-kazu-fd451-default-rtdb.firebaseio.com/"
+service_account_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+if not service_account_json:
+    raise Exception("Firebase service account not found!")
 
-cred = credentials.Certificate(SERVICE_ACCOUNT_FILE)
-firebase_admin.initialize_app(cred, {'databaseURL': DATABASE_URL})
+cred_dict = json.loads(service_account_json)
+cred = credentials.Certificate(cred_dict)
+
+firebase_admin.initialize_app(cred, {
+    'databaseURL': 'https://project-kazu-fd451-default-rtdb.firebaseio.com/'
+})
+
 
 # Firestore client
 firestore_db = firestore.client()
